@@ -48,14 +48,47 @@ resolve_webui_dir() {
     return 1
 }
 
+# The Vast AUTOMATIC1111 image keeps PyTorch in the WebUI venv. A clean
+# onstart shell does not activate that venv, so system python3 has no torch.
+resolve_torch_python() {
+    local candidate d
+    local -a candidates=()
+    if [ -n "${WEBUI_DIR:-}" ]; then
+        candidates+=("${WEBUI_DIR}/venv/bin/python" "${WEBUI_DIR}/venv/bin/python3")
+    fi
+    for d in /workspace/stable-diffusion-webui /root/stable-diffusion-webui /opt/stable-diffusion-webui; do
+        candidates+=("${d}/venv/bin/python" "${d}/venv/bin/python3")
+    done
+    candidates+=(/opt/conda/bin/python /opt/conda/bin/python3)
+    if command -v python3 >/dev/null 2>&1; then
+        candidates+=("$(command -v python3)")
+    fi
+    for candidate in "${candidates[@]}"; do
+        if [ -x "$candidate" ] && "$candidate" -c 'import torch' >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # --- verify_cuda -----------------------------------------------------------
 
 CURRENT_STAGE="verify_cuda"
 log "stage: verify_cuda"
 report_stage '{"stage":"verify_cuda"}'
 
+WEBUI_DIR="$(resolve_webui_dir)" || WEBUI_DIR=""
+TORCH_PYTHON="$(resolve_torch_python)" || {
+    log "no Python with torch found"
+    send_log_tail
+    report_stage '{"stage":"verify_cuda","message":"PyTorch is not installed in the WebUI environment."}'
+    exit 1
+}
+log "using ${TORCH_PYTHON}"
+
 set +e
-cuda_out="$(python3 - <<'PY' 2>&1
+cuda_out="$("$TORCH_PYTHON" - <<'PY' 2>&1
 import sys
 import torch
 print(f"torch={torch.__version__} cuda={torch.version.cuda}", flush=True)
@@ -74,14 +107,14 @@ if [ "$cuda_rc" -ne 0 ]; then
 fi
 send_log_tail
 
-WEBUI_DIR="$(resolve_webui_dir)" || {
+if [ -z "$WEBUI_DIR" ]; then
     log "webui.sh not found; cloning AUTOMATIC1111 into /workspace/stable-diffusion-webui"
     mkdir -p /workspace
     if [ ! -d /workspace/stable-diffusion-webui/.git ]; then
         git clone --depth=1 https://github.com/AUTOMATIC1111/stable-diffusion-webui.git /workspace/stable-diffusion-webui
     fi
     WEBUI_DIR="/workspace/stable-diffusion-webui"
-}
+fi
 export WEBUI_DIR
 MODEL_FILE="${WEBUI_DIR}/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors"
 
